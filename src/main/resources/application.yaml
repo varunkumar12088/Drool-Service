@@ -1,0 +1,10 @@
+spring:
+  application.name: Drool-Service
+
+database:
+  name: drool-service
+
+server:
+  port: 9095
+
+
