@@ -30,17 +30,16 @@ public class DroolServiceImpl implements DroolService {
 
     @Override
     public void createRules(ProductConfig productConfig) {
-        LOGGER.debug("create the rules for productConfig {} ", productConfig);
+        LOGGER.debug("Creating rules for productConfig {}", productConfig);
         List<Drool> drools = new ArrayList<>();
         List<RuleDefinition> definitions = productConfig.getDefinitions();
-        for(RuleDefinition ruleDefinition : definitions) {
-            String whenCondition = getWhen(ruleDefinition);
-            String action = getAction(ruleDefinition);
+
+        for (RuleDefinition ruleDefinition : definitions) {
             Drool drool = new Drool();
             drool.setEngineId(EngineId.PRE);
             drool.setProductName(productConfig.getName());
-            drool.setWhen(whenCondition);
-            drool.setThen(action);
+            drool.setWhen(buildWhen(ruleDefinition));
+            drool.setThen(buildThen(ruleDefinition));
             drools.add(drool);
         }
         droolRepository.saveAll(drools);
@@ -49,73 +48,80 @@ public class DroolServiceImpl implements DroolService {
     @Override
     public TestCDR executeRule(String json) {
         try {
-            ObjectNode cdr = this.objectMapper.readValue(json, ObjectNode.class);
+            ObjectNode cdr = objectMapper.readValue(json, ObjectNode.class);
             TestCDR testCDR = new TestCDR(cdr);
 
             StatelessKieSession statelessKieSession = buildStatelessKieSession();
             statelessKieSession.execute(testCDR);
-            System.out.println("message: " + testCDR.getCdr().get("message"));
-            System.out.println("skuName: " + cdr.get("skuName"));
-            LOGGER.debug("CDR data : {}", testCDR.getCdr());
-            LOGGER.debug("Test CDR data : {}", testCDR.getCdr());
+
+            // Optionally, check and log updated fields
+            LOGGER.debug("Output message: {}", testCDR.getCdr().get("message"));
+            LOGGER.debug("Output skuName: {}", testCDR.getCdr().get("skuName"));
             return testCDR;
-        } catch (Exception ex){
+        } catch (Exception ex) {
+            LOGGER.error("Error executing rule", ex);
             throw new RuntimeException(ex);
         }
     }
 
-    private String getWhen(RuleDefinition definition){
+    // --- Utility: Builds 'when' clause ---
+    private String buildWhen(RuleDefinition definition) {
         Condition condition = definition.getCondition();
-        List<Property> properties = condition.getProperties();
-        StringBuilder sb = new StringBuilder("when\n\t$testCdr: TestCDR($cdrJson: cdr,");
-        for (Property property : properties) {
-            String key = property.getKey();
-            String value = property.getValue();
-            sb.append(" $cdrJson.get(\"");
-            sb.append(key);
-            sb.append("\"");
-            sb.append(").asText().matches(");
-            sb.append("\"(?i)");
-            sb.append(value);
-            sb.append("\")");
-            sb.append(",");
+        List<Property> properties = condition != null ? condition.getProperties() : null;
+
+        StringBuilder sb = new StringBuilder("when\n\t$testCdr: TestCDR($cdrJson: cdr");
+
+        if (properties != null && !properties.isEmpty()) {
+            for (Property property : properties) {
+                sb.append(", ")
+                        .append("$cdrJson.get(\"")
+                        .append(property.getKey())
+                        .append("\").asText().matches(\"(?i)")
+                        .append(property.getValue())
+                        .append("\")");
+            }
         }
-        sb.deleteCharAt(sb.length() - 1);
-        sb.append(" )");
+        sb.append(" )"); // always close the parenthesis
         return sb.toString();
     }
 
-    private String getAction(RuleDefinition definition){
+
+    // --- Utility: Builds 'then' clause ---
+    private String buildThen(RuleDefinition definition) {
         Action action = definition.getAction();
-        List<Property> properties = action.getProperties();
+        List<Property> properties = action != null ? action.getProperties() : null;
+
         StringBuilder sb = new StringBuilder("then\n");
-        for (Property property : properties) {
-            String setField = "\t$cdrJson.put(\"" + property.getKey()  + "\"" +
-                    ", " + "\"" + property.getValue() + "\"" +");";
-            sb.append(setField);
-            sb.append("\n");
+        if (properties != null && !properties.isEmpty()) {
+            for (Property property : properties) {
+                sb.append("\t$cdrJson.put(\"")
+                        .append(property.getKey()).append("\", ")
+                        .append("\"").append(property.getValue()).append("\");\n");
+            }
         }
-        //sb.append("\tupdate($testCdr);\n");
+        // No update() for StatelessKieSession!
         return sb.toString();
     }
 
 
+    // --- DRL Assembler ---
     public String assembleDRL(List<Drool> rules) {
         StringBuilder drlBuilder = new StringBuilder();
-        drlBuilder.append("package com.academy.rules;\n");
-        drlBuilder.append("import com.fasterxml.jackson.databind.node.ObjectNode;\n");
-        drlBuilder.append("import com.academy.drool.domain.*;\n");
+        drlBuilder.append("package com.academy.rules;\n")
+                .append("import com.fasterxml.jackson.databind.node.ObjectNode;\n")
+                .append("import com.academy.drool.domain.*;\n\n");
 
-        for(Drool drool : rules){
-            drlBuilder.append("rule \"").append(drool.getId()).append("\"\n");
-            drlBuilder.append(drool.getWhen()).append("\n");
-            drlBuilder.append(drool.getThen()).append("\n");
-            drlBuilder.append("end\n\n");
+        for (Drool drool : rules) {
+            drlBuilder.append("rule \"").append(drool.getId()).append("\"\n")
+                    .append(drool.getWhen()).append("\n")
+                    .append(drool.getThen()).append("\n")
+                    .append("end\n\n");
         }
-        LOGGER.debug("final rules : {} ", drlBuilder);
+        LOGGER.info("Generated DRL:\n{}", drlBuilder);
         return drlBuilder.toString();
     }
 
+    // --- KIE Helper, builds from latest rules ---
     private StatelessKieSession buildStatelessKieSession() {
         List<Drool> drools = droolRepository.findAll();
         String drl = assembleDRL(drools);
